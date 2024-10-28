@@ -8,6 +8,8 @@ import numpy as np
 import open3d as o3d
 import torch
 import yaml
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 sys.path.append(str(Path(__file__).absolute().parent.parent))
 from feature_matchers.LightGlue.lightglue_handler import LightGlueDataHandler
@@ -32,14 +34,28 @@ def read_camera_matrix(path_to_matrix):
     return K, D
 
 
-def estimate_pose(kpn_ref, kpn_cur, K, D):
+def pixel_to_cam_norm_plane(pts, K):
+    pts = np.array(pts)
+
+    x_norm = (pts[:, 0] - K[0, 2]) / K[0, 0]
+    y_norm = (pts[:, 1] - K[1, 2]) / K[1, 1]
+
+    pts_norm = np.column_stack((x_norm, y_norm))
+
+    return pts_norm
+
+def estimate_pose(points1, points2, K, D):
+    inliers_index = []
     ransac_method = cv2.RANSAC
-    kpn_cur = kpn_cur.numpy().astype(np.float32)
-    kpn_ref = kpn_ref.numpy().astype(np.float32)
-    E, mask_match = cv2.findEssentialMat(kpn_cur, kpn_ref, K, method=ransac_method)
+    points2 = points2.numpy().astype(np.float32)
+    points1 = points1.numpy().astype(np.float32)
+    E, mask_match = cv2.findEssentialMat(points1, points2, K, method=ransac_method)
+    for i in range(mask_match.shape[0]):
+        if mask_match[i][0] == 1:
+            inliers_index.append(i)
     _, E, R, t, mask = cv2.recoverPose(
-        points1=kpn_cur,
-        points2=kpn_ref,
+        points1=points1,
+        points2=points2,
         cameraMatrix1=K,
         distCoeffs1=D,
         cameraMatrix2=K,
@@ -47,46 +63,53 @@ def estimate_pose(kpn_ref, kpn_cur, K, D):
         E=E,
         mask=mask_match,
     )
-    return R, t.T
+    return R, t.T, inliers_index
 
 
-def viz(R, t):
+def do_triangulation(pts_on_np1, pts_on_np2, R, t, inliers):
+    pts_on_np1 = pts_on_np1.numpy().astype(np.float32)
+    pts_on_np2 = pts_on_np2.numpy().astype(np.float32)
+
+    inlier_pts_on_np1 = [pts_on_np1[idx] for idx in inliers]
+    inlier_pts_on_np2 = [pts_on_np2[idx] for idx in inliers]
+
+    inlier_pts_on_np1 = np.array(inlier_pts_on_np1).T
+    inlier_pts_on_np2 = np.array(inlier_pts_on_np2).T
+
+    T_cam1_to_world = np.array([[1, 0, 0, 0],
+                                 [0, 1, 0, 0],
+                                 [0, 0, 1, 0]])
+
+    T_cam2_to_world = np.hstack((R, t.reshape(-1, 1)))
+
+    pts4d_in_world = cv2.triangulatePoints(T_cam1_to_world, T_cam2_to_world,
+                                            inlier_pts_on_np1,
+                                            inlier_pts_on_np2)
+
+    pts3d_in_world = []
+    for i in range(pts4d_in_world.shape[1]):
+        x = pts4d_in_world[:, i]
+        x /= x[3]
+        pt3d_in_world = x[:3]
+        pts3d_in_world.append(pt3d_in_world)
+    return pts3d_in_world
+
+def vis(R, t, points):
     mesh_frame_1 = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    colors = np.array([[0, 0, 0],
+                              [0, 1, 0],
+                              [0, 0, 0]])
+    mesh_frame_1.vertex_colors = o3d.utility.Vector3dVector(np.repeat(colors, 2, axis=0))
     mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
     transformation_matrix = np.eye(4)
     transformation_matrix[:3, :3] = R
     transformation_matrix[:3, 3] = t
     mesh_frame.transform(transformation_matrix)
-    o3d.visualization.draw_geometries([mesh_frame_1, mesh_frame])
-
-
-def optimize(R, t):
-    opt = g2o.SparseOptimizer()
-    block_solver = g2o.BlockSolverSE3(g2o.LinearSolverEigenSE3())
-    solver = g2o.OptimizationAlgorithmLevenberg(block_solver)
-    opt.set_algorithm(solver)
-
-    v1 = g2o.VertexSE3Expmap()
-    v1.set_estimate(g2o.SE3Quat(np.eye(3), np.array([0, 0, 1])))
-    v1.set_id(0)
-    v1.set_fixed(True)
-    opt.add_vertex(v1)
-
-    v2 = g2o.VertexSE3Expmap()
-    v2.set_id(1)
-    v2.set_estimate(g2o.SE3Quat(R, t.flatten()))
-    opt.add_vertex(v2)
-
-    edge = g2o.EdgeSE3()
-    edge.set_id(0)
-    edge.set_vertex(0, v1)
-    edge.set_vertex(1, v2)
-    opt.add_edge(edge)
-    opt.initialize_optimization()
-    opt.optimize(10)
-    opt_v1 = opt.vertex(0).estimate()
-    opt_v2 = opt.vertex(1).estimate()
-    return opt_v1, opt_v2
+    points = np.array(points, dtype=np.float64)
+    pcd_1 = o3d.geometry.PointCloud()
+    pcd_1.points = o3d.utility.Vector3dVector(points)
+    pcd_1.paint_uniform_color([1, 0, 0])
+    o3d.visualization.draw_geometries([mesh_frame_1, mesh_frame, pcd_1])
 
 
 if __name__ == "__main__":
@@ -107,6 +130,11 @@ if __name__ == "__main__":
         type=str,
         help="Path to the directory that contains intrinsics and distortion",
     )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        help="Path to the directory in which the visualization images are written",
+    )
 
     args = parser.parse_args()
     with open(args.input_pairs, "r") as f:
@@ -122,8 +150,7 @@ if __name__ == "__main__":
         features0 = matcher.extract_features(inp0)
         features1 = matcher.extract_features(inp1)
         mkpts0, mkpts1 = matcher.match_features(features0, features1)
-        R, t = estimate_pose(mkpts0, mkpts1, K, D)
-        v1, v2 = optimize(R, t)
-        print(R, t)
-        print(v2.rotation().matrix(), v2.translation())
-        viz(R, t)
+        R, t, inliers_index = estimate_pose(mkpts0, mkpts1, K, D)
+      #  mkpts0, mkpts1 = pixel_to_cam_norm_plane(mkpts0, K), pixel_to_cam_norm_plane(mkpts1, K),
+        pts3 = do_triangulation(mkpts0, mkpts1, R, t, inliers_index)
+        vis(R, t, pts3)
