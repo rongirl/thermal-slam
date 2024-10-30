@@ -104,7 +104,7 @@ def visualize(points):
 
 
 def do_triangulation(
-    pts_on_np1, pts_on_np2, R_cam2_to_cam1, t_cam2_to_cam1, inliers, K
+    pts_on_np1, pts_on_np2, R_cam1_to_cam2, t_cam1_to_cam2, inliers, K
 ):
     inlier_pts_on_np1 = [pts_on_np1[idx] for idx in inliers]
     inlier_pts_on_np2 = [pts_on_np2[idx] for idx in inliers]
@@ -114,7 +114,7 @@ def do_triangulation(
 
     T_cam1_to_world = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]])
 
-    T_cam2_to_world = np.hstack((R_cam2_to_cam1, t_cam2_to_cam1.reshape(-1, 1)))
+    T_cam2_to_world = np.hstack((R_cam1_to_cam2, t_cam1_to_cam2.reshape(-1, 1)))
 
     pts4d_in_world = cv2.triangulatePoints(
         K @ T_cam1_to_world, K @ T_cam2_to_world, inlier_pts_on_np1, inlier_pts_on_np2
