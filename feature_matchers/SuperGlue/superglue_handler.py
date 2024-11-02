@@ -21,14 +21,23 @@ class SuperGlueDataHandler(DataHandler):
             image, (self.resize[0], self.resize[1]), interpolation=cv2.INTER_AREA
         )
 
-    def read_image(self, filename):
+    def undistort_image(self, image, K, D):
+        h, w = image.shape[:2]
+        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(K, D, (w, h), 1, (w, h))
+        map1, map2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), newcameramtx, (w, h), cv2.CV_16SC2)
+        undistorted_img = cv2.remap(image, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        D = np.zeros((4, 1))
+        return undistorted_img, newcameramtx, D
+
+    def read_image(self, filename, K, D):
         path_to_image = Path(self.input_path) / filename
         image = cv2.imread(str(path_to_image), 0)
         if image is None:
             return None, None
         image = self._resize_image(image)
+        image, K, D = self.undistort_image(image, K, D)
         img_tensor = torch.from_numpy(image / 255.0).float()[None, None]
-        return image, img_tensor
+        return image, img_tensor, K, D
 
     def save_macthes(self, matches):
         margin = 10
@@ -44,14 +53,14 @@ class SuperGlueDataHandler(DataHandler):
             matches["mkpts1"]
         ).astype(int)
         for (x0, y0), (x1, y1) in zip(mkpts0, mkpts1):
-            cv2.line(
-                out,
-                (int(x0), int(y0)),
-                (int(x1 + margin + W0), int(y1)),
-                color=(0, 0, 255),
-                thickness=1,
-                lineType=cv2.LINE_AA,
-            )
+            # cv2.line(
+            #     out,
+            #     (int(x0), int(y0)),
+            #     (int(x1 + margin + W0), int(y1)),
+            #     color=(0, 0, 255),
+            #     thickness=1,
+            #     lineType=cv2.LINE_AA,
+            # )
             cv2.circle(
                 out, (int(x0), int(y0)), 2, (0, 0, 255), -1, lineType=cv2.LINE_AA
             )
